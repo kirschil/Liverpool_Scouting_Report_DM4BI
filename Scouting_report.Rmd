@@ -27,7 +27,7 @@ h4.date { /* Header 4 - and the author and data headers use this too  */
 </style>
 
 <center>
-<!-- ![](Liverpool_FC.png) --> 
+![](Liverpool_FC.png)
 </center>
 
 
