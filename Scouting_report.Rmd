@@ -1,0 +1,710 @@
+---
+title: "Scouting Report: Liverpool <br> Clustering To Find Similar Transfer Target Archetypes"
+author: "Iain Kirsch"
+date: "`r Sys.Date()`"
+output: html_document
+runtime: shiny
+---
+<style type="text/css">
+
+h1.title {
+  font-size: 38px;
+  color: firebrick;
+  text-align: center;
+}
+h4.author { /* Header 4 - and the author and data headers use this too  */
+    font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: black;
+  text-align: center;
+}
+h4.date { /* Header 4 - and the author and data headers use this too  */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: black;
+  text-align: center;
+}
+</style>
+
+<center>
+<!-- ![](Liverpool_FC.png) --> 
+</center>
+
+
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(kableExtra)
+library(shiny)
+library(shinydashboard)
+data <- read.csv("soccer.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+```{r echo=FALSE, message=FALSE, error=FALSE, include=FALSE}
+
+set.seed(1234)
+
+data <- data[c(1:3, 5, 7:9, 11:18, 21, 25:53, 88)]
+
+right = function(text, num_char) {
+  substr(text, nchar(text) - (num_char-1), nchar(text))
+}
+
+left = function(text, num_char) {
+  substr(text, 1, num_char)
+}
+
+
+valuecutends <- function(x){
+  if(grepl("M", x)){
+    compensationlevel <- 1000000
+  } else {
+    compensationlevel <- 1000
+  }
+  a <- left(x,nchar(x)-1)
+  as.numeric(right(a,nchar(a)-1))*compensationlevel
+}
+
+for(i in 1:length(data$ID)){
+  data$Value_Euros[i] <- valuecutends(data$Value[i])
+  data$Wage_Euros[i] <- valuecutends(data$Wage[i])
+  data$Clause_Euros[i] <- valuecutends(data$Release.Clause[i])
+  data$Weight_lbs[i] <- as.numeric(left(data$Weight[i], 3))
+}
+
+data <- data[c(1:7, 11, 14:18, 47:50)]
+data <- separate(data, col= Work.Rate, sep="/", into = c("Offensive.Work.Rate", "Defensive.Work.Rate"))
+data <- data %>% 
+  filter(!is.na(Weight_lbs))
+
+data <- separate(data, col= Height, sep="'", into = c("Feet", "Inches"))
+
+data$Height_Inches <- as.numeric(data$Feet)*12 + as.numeric(data$Inches)
+
+data <- data[-14, -15]
+
+for(i in 1:length(data$ID)){
+  data$Years_On_Contract[i] <- max(as.numeric(data$Contract.Valid.Until[i]) - 2019, 0)
+}
+
+for(i in 1:length(data$ID)){
+  if(is.na(data$Years_On_Contract[i])){
+    data$Years_On_Contract[i] <- max(as.numeric(right(data$Contract.Valid.Until[i],2))-19,0)
+  }
+}
+
+liverpool <- data %>% 
+  filter(Club == "Liverpool")
+
+
+
+needs <- liverpool %>% 
+  filter(Position=="ST") %>% 
+  select(Name, Age, Overall)
+
+possible <- data %>% 
+  filter(Position == "CAM" | Position== "ST") %>% 
+  filter(Club != "Liverpool") %>% 
+  filter(Overall > 78 | Potential > 80) %>% 
+  filter(Wage_Euros < 130000) %>% 
+  filter(Value_Euros < 50000000) %>% 
+  filter(Defensive.Work.Rate != " Low")
+
+# Cluster the possible players into groups
+
+clusterdata <- possible %>% 
+  select(ID, Name, Age, Overall, Potential, Years_On_Contract, Position, 
+         Wage_Euros, Value_Euros, Offensive.Work.Rate, Defensive.Work.Rate,
+         Skill.Moves, Weight_lbs, Height_Inches)
+
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+
+
+clusterdata$Age <- range01(clusterdata$Age)
+clusterdata$Overall <- range01(clusterdata$Overall)
+clusterdata$Potential <- range01(clusterdata$Potential)
+clusterdata$Years_On_Contract <- range01(clusterdata$Years_On_Contract)
+clusterdata$Wage_Euros <- range01(clusterdata$Wage_Euros)
+clusterdata$Value_Euros <- range01(clusterdata$Value_Euros)
+clusterdata$Skill.Moves <- range01(clusterdata$Skill.Moves)
+clusterdata$Weight_lbs <- range01(clusterdata$Weight_lbs)
+clusterdata$Height_Inches <- range01(clusterdata$Height_Inches)
+
+for(i in 1:length(clusterdata$Name)){
+  if(clusterdata$Offensive.Work.Rate[i]=="High"){
+    clusterdata$High.Rate.Offense[i] <- 1
+  } else {
+    clusterdata$High.Rate.Offense[i] <- 0
+  }
+}
+
+for(i in 1:length(clusterdata$Name)){
+  if(clusterdata$Defensive.Work.Rate[i]==" High"){
+    clusterdata$High.Rate.Defense[i] <- 1
+  } else {
+    clusterdata$High.Rate.Defense[i] <- 0
+  }
+}
+
+for(i in 1:length(clusterdata$Name)){
+  if(clusterdata$Position[i]=="ST"){
+    clusterdata$Striker[i] <- 1
+  } else {
+    clusterdata$Striker[i] <- 0
+  }
+}
+
+rownames(clusterdata)<- clusterdata$ID
+
+clusterdata <- clusterdata %>% 
+  select(-Offensive.Work.Rate, -Defensive.Work.Rate, -Position, -Name, -ID)
+
+# Testing 2-10 clusters, using best of 10 tries for each one
+cluster_range <- 2:10
+kmeans_iteration_tries <- 10
+
+# Initialize objects for gathering results
+kmeans_results <- vector("list", length(cluster_range)) 
+kmeans_k <- rep(0, length(cluster_range))
+temp_results <- vector("list", length(cluster_range))
+temp_tot_withinss <- rep(NULL, length(cluster_range))
+
+# Loop through values of k, capture best of 10 models for each based on 
+# lowest within-cluster distances (i.e. tightest clusters).
+for(i in 1:length(cluster_range)){
+  
+  message(paste0("Cluster number: ", cluster_range[i]))
+  
+  # Loop through 10 iterations with k clusters
+  for(j in 1:kmeans_iteration_tries){
+    temp_results[[j]] <- kmeans(x = clusterdata, 
+                                centers = cluster_range[i], 
+                                iter.max = 20)
+    temp_tot_withinss[j] <- temp_results[[j]]$tot.withinss
+  }
+  
+  # Store the best run for each considered k
+  kmeans_results[[i]] <- temp_results[[which.min(temp_tot_withinss[j])]] 
+  # Keep track of k
+  kmeans_k[i] <- cluster_range[i]
+}
+
+
+# Elbow method - plot within-cluster SoS for each value of k 
+wss <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  wss[i] <- kmeans_results[[i]]$tot.withinss
+}
+wss_results = list(k = kmeans_k, wss = wss)
+
+wss1<- qplot(wss_results$k, wss_results$wss) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("SSE") +
+  ggtitle("Within-cluster SSEs")
+
+
+# Calculate and plot C-H index for each value of k
+ch <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  kmeans_betweenss <- kmeans_results[[i]]$betweenss
+  kmeans_tot_withinss <- kmeans_results[[i]]$tot.withinss
+  
+  ch[i] <- (kmeans_betweenss / (kmeans_k[i] - 1)) /
+    (kmeans_tot_withinss / (nrow(clusterdata) - kmeans_k[i]))
+}
+ch_index_results = list(k = kmeans_k, ch=ch)
+
+chind1<- qplot(ch_index_results$k, ch_index_results$ch) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("CH Score") +
+  ggtitle("CH-Score Cluster Number Selector ")
+
+
+# Capture best model for chosen value of k
+chosen_k <- 4
+clusters2 <- kmeans_results[[which(kmeans_k == chosen_k)]]
+
+# Get cluster sizes
+clusters2_sizes <- clusters2$size
+print(clusters2_sizes)
+
+
+clusters2_centroids <- as.data.frame(clusters2$centers)
+clusters2_clusters <- as.data.frame(clusters2$cluster)
+d <- clusters2_clusters
+names <- rownames(d)
+rownames(d) <- NULL
+data2 <- cbind(names,d)
+names(data2)<- c("ID", "Cluster")
+data2$ID <- as.numeric(as.character(data2$ID))
+check <- left_join(possible, data2, by="ID")
+
+
+
+group1 <- check %>% 
+  filter(Cluster==1) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs, ID) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+g1 <- scales::dollar_format(group1$Wage_Euros, prefix = " ")
+group1 <- group1 %>% 
+  mutate(Wage_Euros= g1(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g1(Clause_Euros)) %>% 
+  mutate(Value_Euros= g1(Value_Euros))
+
+group2 <- check %>% 
+  filter(Cluster==2) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs, ID) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+g2 <- scales::dollar_format(group2$Wage_Euros, prefix = " ")
+group2<- group2 %>% 
+  mutate(Wage_Euros= g2(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g2(Clause_Euros)) %>% 
+  mutate(Value_Euros= g2(Value_Euros))
+
+group3 <- check %>% 
+  filter(Cluster==3) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs, ID) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+g3 <- scales::dollar_format(group3$Wage_Euros, prefix = " ")
+group3 <- group3 %>% 
+  mutate(Wage_Euros= g3(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g3(Clause_Euros)) %>% 
+  mutate(Value_Euros= g3(Value_Euros))
+
+group4 <- check %>% 
+  filter(Cluster==4) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs, ID) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+g4 <- scales::dollar_format(group4$Wage_Euros, prefix = " ")
+group4 <- group4 %>% 
+  mutate(Wage_Euros= g4(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g4(Clause_Euros)) %>% 
+  mutate(Value_Euros= g4(Value_Euros))
+
+
+# Hard working strikers, high skills, skewed younger
+table1<- group1 %>% 
+  select(-ID) %>% 
+  kable(caption=paste("Scouting Group 1")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# False nines, hardest working group, high valuations
+table2 <- group2 %>% 
+  select(-ID) %>% kable(caption=paste("Scouting Group 2")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# Big strikers, lower effort levels
+table3 <- group3 %>% 
+  select(-ID) %>% 
+  kable(caption=paste("Scouting Group 3")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# Highly skilled CAMS, creative, medium efforts
+table4 <- group4 %>% 
+  select(-ID) %>% 
+  kable(caption=paste("Scouting Group 4")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+########################################################################################
+########################################################################################
+########################################################################################
+# Round 2
+
+interesting <- rbind(group1, group2, group4)
+interesting <- interesting %>% 
+  select(ID)
+
+clusterdata$ID <- as.numeric(rownames(clusterdata))
+rownames(clusterdata) <- NULL
+
+interesting <- left_join(interesting, clusterdata, by="ID") %>% 
+  select(ID, Overall, Potential, Age, Value_Euros)
+
+rownames(interesting)<- interesting$ID
+interesting <- interesting %>% 
+  select(-ID)
+
+# Testing 2-10 clusters, using best of 10 tries for each one
+cluster_range <- 2:10
+kmeans_iteration_tries <- 10
+
+# Initialize objects for gathering results
+kmeans_results <- vector("list", length(cluster_range)) 
+kmeans_k <- rep(0, length(cluster_range))
+temp_results <- vector("list", length(cluster_range))
+temp_tot_withinss <- rep(NULL, length(cluster_range))
+
+# Loop through values of k, capture best of 10 models for each based on 
+# lowest within-cluster distances (i.e. tightest clusters).
+for(i in 1:length(cluster_range)){
+  
+  message(paste0("Cluster number: ", cluster_range[i]))
+  
+  # Loop through 10 iterations with k clusters
+  for(j in 1:kmeans_iteration_tries){
+    temp_results[[j]] <- kmeans(x = interesting, 
+                                centers = cluster_range[i], 
+                                iter.max = 20)
+    temp_tot_withinss[j] <- temp_results[[j]]$tot.withinss
+  }
+  
+  # Store the best run for each considered k
+  kmeans_results[[i]] <- temp_results[[which.min(temp_tot_withinss[j])]] 
+  # Keep track of k
+  kmeans_k[i] <- cluster_range[i]
+}
+
+
+# Elbow method - plot within-cluster SoS for each value of k 
+wss <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  wss[i] <- kmeans_results[[i]]$tot.withinss
+}
+wss_results = list(k = kmeans_k, wss = wss)
+
+wss2 <- qplot(wss_results$k, wss_results$wss) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("SSE") +
+  ggtitle("Within-cluster SSEs")
+
+
+# Calculate and plot C-H index for each value of k
+ch <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  kmeans_betweenss <- kmeans_results[[i]]$betweenss
+  kmeans_tot_withinss <- kmeans_results[[i]]$tot.withinss
+  
+  ch[i] <- (kmeans_betweenss / (kmeans_k[i] - 1)) /
+    (kmeans_tot_withinss / (nrow(interesting) - kmeans_k[i]))
+}
+ch_index_results = list(k = kmeans_k, ch=ch)
+
+chind2 <- qplot(ch_index_results$k, ch_index_results$ch) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("CH Score") +
+  ggtitle("CH-Score Cluster Number Selector ")
+
+
+# Capture best model for chosen value of k
+chosen_k <- 4
+clusters2 <- kmeans_results[[which(kmeans_k == chosen_k)]]
+
+
+# ------------------------------------------------------------------------------------
+# Same outputs as last time
+# ------------------------------------------------------------------------------------
+
+# Get cluster sizes
+clusters2_sizes <- clusters2$size
+print(clusters2_sizes)
+
+
+clusters2_centroids <- as.data.frame(clusters2$centers)
+clusters2_clusters <- as.data.frame(clusters2$cluster)
+d <- clusters2_clusters
+names <- rownames(d)
+rownames(d) <- NULL
+data3 <- cbind(names,d)
+names(data3)<- c("ID", "Cluster")
+data3$ID <- as.numeric(as.character(data3$ID))
+check <- left_join(data3, possible, by="ID")
+
+
+
+group1.2 <- check %>% 
+  filter(Cluster==1) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+
+group2.2 <- check %>% 
+  filter(Cluster==2) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+
+group3.2 <- check %>% 
+  filter(Cluster==3) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+
+group4.2 <- check %>% 
+  filter(Cluster==4) %>% 
+  select(Name, Club, Position, Age, Overall, Potential, Offensive.Work.Rate, Defensive.Work.Rate, 
+         Clause_Euros, Value_Euros, Wage_Euros, Years_On_Contract, Height_Inches, Weight_lbs) %>% 
+  arrange(desc((Overall+Potential)/2)) 
+
+### Building tables
+
+g1 <- scales::dollar_format(group1.2$Wage_Euros, prefix = " ")
+group1.2 <- group1.2 %>% 
+  mutate(Wage_Euros= g1(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g1(Clause_Euros)) %>% 
+  mutate(Value_Euros= g1(Value_Euros))
+
+g2 <- scales::dollar_format(group2.2$Wage_Euros, prefix = " ")
+group2.2 <- group2.2 %>% 
+  mutate(Wage_Euros= g2(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g2(Clause_Euros)) %>% 
+  mutate(Value_Euros= g2(Value_Euros))
+
+g3 <- scales::dollar_format(group3.2$Wage_Euros, prefix = " ")
+group3.2 <- group3.2 %>% 
+  mutate(Wage_Euros= g3(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g3(Clause_Euros)) %>% 
+  mutate(Value_Euros= g3(Value_Euros))
+
+g4 <- scales::dollar_format(group4.2$Wage_Euros, prefix = " ")
+group4.2 <- group4.2 %>% 
+  mutate(Wage_Euros= g4(Wage_Euros)) %>% 
+  mutate(Clause_Euros= g4(Clause_Euros)) %>% 
+  mutate(Value_Euros= g4(Value_Euros))
+
+# Young, high potential, but not yet established
+table1.2 <- kable(group1.2, caption=paste("Scouting Group 1")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# Young, only a few have enough potential to justify purchase, lower current
+table2.2 <- kable(group2.2, caption=paste("Scouting Group 2")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# Possible back up options in prime to older with average overall
+table3.2 <- kable(group3.2, caption=paste("Scouting Group 3")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+# Top tier targets in transfer market (young-prime age, but established and could improve squad)
+table4.2 <- kable(group4.2, caption=paste("Scouting Group 4")) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>% 
+  column_spec(1, bold = T, color = "white", background = "red") %>%
+  scroll_box(height = "540px")
+
+```
+
+## Scouting Report
+
+This analysis uses the FIFA 19 Complete Dataset from Kaggle to determine what transfer targets fit the profile necessary to improve the squad. The first steps are cleaning the dataset and determining what positions the team needs to target.  
+<br>
+```{r}
+table(liverpool$Position)
+```
+<br>
+Using knowledge on the current squad contract situation, we know that we may be losing Daniel Sturridge or Divock Origi in the next window as they haven't signed new contracts. Additionally, neither really fit the new style of play. We should look at our list of striking options to see if we have a good backup for Firmino.
+<br>
+```{r}
+liverpool %>% 
+  filter(Position=="ST") %>% 
+  select(Name, Age, Overall, Years_On_Contract)
+```
+<br>
+The two strikers with long term deals are both quite young and inexperienced, so lets look at a list of options to add to our squad. We know the general archetype that the coach is looking for in a player: hardworking for the Gegenpress system, able to contribute now, in their prime or on the younger side, technically skilled, and affordable/feasible from a value and wage standpoint. A secondary target might be a high potential younger player to serve as an understudy to Firmino for a few years before becoming a regular member of the first team.
+<br>
+<br>
+The coach, Jurgen Klopp, has identified a few players that he likes. Unfortunately these players are not feasible due to rivalries like Richarlison, or they are happy where they are for now like Serge Gnabry. Younger players that fit the secondary target like Phil Foden are also impossible targets due to Manchester City's status as a title rival. Knowing this, the scouting team has decided to cluster players meeting a few basic criteria in order to find players similar to ones the coach has admired in the past.
+<br>
+<br>
+First, the number of clusters needs to be determined:
+<br>
+<br>
+```{r echo=FALSE} 
+ui <- dashboardPage(skin = "red",
+                    dashboardHeader(title= "Fig. 1: Number of Clusters", titleWidth = 350),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fillPage(padding = 0,
+                      
+           box(title="Within-cluster SSEs", id="normal", solidHeader = TRUE, status = "danger",
+                    plotOutput("plot1", height = 250)),
+           box(title="CH-Score Cluster Number Selector", id="normal", solidHeader = TRUE, status = "danger",
+                    plotOutput("plot2", height = 250))
+            )))
+
+server <- function(input, output) {
+  
+    output$plot1<- renderPlot({
+  wss1
+      })
+    output$plot2<- renderPlot({
+  chind1
+   })
+}
+shinyApp(ui=ui, server=server)
+
+```
+<br>
+<br>
+The above plots seem to indicate that 4 clusters would be a good number to start with.After doing this we obtain four scouting groups. The first group is composed of hard working strikers with higher than average level of trickery. This group also skews younger. Example players are Patrick Schik and Lautaro Martinez. Many would likely be utilized as "wingers" at Liverpool. The second group is composed of attacking midfielders and strikers with the highest work rate of any cluster. This group is somewhat smaller in terms of height and weight and tends to have higher valuations. Additionally, many in this group fit the "false nine" archetype that our current striker, Roberto Firmino, exemplifies. The third group is larger strikers, the "target man" with lower average effort levels. Previous attempts to use this type of player at Liverpool like Balotelli and Benteke have failed. Due to this lack of tactical fit, these players can now be discarded from the target pool. The final group is composed primarily of creative attacking midfielders with medium effort levels. This "playmaker" archetype would be along the lines of a direct replacement for Coutinho, who departed last year.
+<br>
+<br>
+```{r echo=FALSE}
+table1
+
+table2
+
+table3
+
+table4
+```
+<br>
+<br>
+Moving forward we can discard the "target man" cluster. Though this clustering did a good job at putting players into groups based on playing style, we want to be a little more specific. We want to be able to differentiate between a player that can make an impact now, a player with potential at the top level, and players who would be possible cheap backups or young players we could make a profit by developing then selling. To make this differentiation without the time consuming process of scouting and labeling, we do a second round of clustering with the remaining players using a more focused set of variables: Age, Overall, Potential, and Value.
+<br>
+<br>
+```{r echo=FALSE} 
+ui <- dashboardPage(skin = "red",
+                    dashboardHeader(title= "Fig. 2: Number of Clusters, Round 2", titleWidth = 350),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fillPage(padding = 0,
+                      
+           box(title="Within-cluster SSEs", id="normal", solidHeader = TRUE, status = "danger",
+                    plotOutput("plot1", height = 250)),
+           box(title="CH-Score Cluster Number Selector", id="normal", solidHeader = TRUE, status = "danger",
+                    plotOutput("plot2", height = 250))
+            )))
+
+server <- function(input, output) {
+  
+    output$plot1<- renderPlot({
+  wss2
+      })
+    output$plot2<- renderPlot({
+  chind2
+   })
+}
+shinyApp(ui=ui, server=server)
+
+```
+<br>
+<br>
+The first cluster consist of players who are relatively young and have medium-high potential. They are not yet established at their clubs and have lower valuations. This cluster are players that could be interesting long term, and there are some that would represent shrewd business. While they will all eventually be capable of playing a role at the highest level, very few in this cluster seem poised to become stars. Many are from lower divisions or lesser known leagues. The second cluster are very young, but have potential to be the stars of tomorrow. This group is more in line with our secondary target group, and unsurprisingly, Phil Foden is there. While many are from major clubs, there appear to be a few diamonds in the rough, like Erling Braut Haland from Molde FK who is available for only 3.4 million euros. The third cluster is the least interesting in terms of potential impact. This group is composed of players in their late prime or older who would be suitable short-term solutions as backup. High valuations for many make these players less attractive for that role, however. The final cluster is the most relevant in terms of our primary target. Most of the players are either young or in their prime and established. Many have potential to become future stars while still being able to provide an immediate impact. Players who had previously been mentioned as potential targets like Gnabry, Richarlison, and Lanzini being present implies this is the type of player we are looking to sign. Former player Iago Aspas being in this cluster adds further credence that this is the player archetype we will be targeting. Klopp's familiarity with the Bundesliga could increase the odds of moves for players like Havertz and Volland of Leverkusen or Amiri at Hoffenheim. Liverpool's propensity to buy young English players indicates that a move for James Maddison wouldn't be unexpected. 
+
+<br>
+<br>
+```{r echo=FALSE}
+table1.2
+
+table2.2
+
+table3.2
+
+table4.2
+```
+<br>
+<br>
+
+## Conclusion and Code
+In conclusion, this analysis has found clustering to be a useful way to group similar targets together so we can see who most closely resembles targets that we cannot successfully purchase. The code below is to show how the clustering process was conducted in R. As an obvious disclaimer, I do not work for Liverpool FC and this is merely the analysis of a fan. 
+
+```{r eval=FALSE}
+# Testing 2-10 clusters, using best of 10 tries for each one
+cluster_range <- 2:10
+kmeans_iteration_tries <- 10
+
+# Initialize objects for gathering results
+kmeans_results <- vector("list", length(cluster_range)) 
+kmeans_k <- rep(0, length(cluster_range))
+temp_results <- vector("list", length(cluster_range))
+temp_tot_withinss <- rep(NULL, length(cluster_range))
+
+# Loop through values of k, capture best of 10 models for each based on 
+# lowest within-cluster distances (i.e. tightest clusters).
+for(i in 1:length(cluster_range)){
+  
+  message(paste0("Cluster number: ", cluster_range[i]))
+  
+  # Loop through 10 iterations with k clusters
+  for(j in 1:kmeans_iteration_tries){
+    temp_results[[j]] <- kmeans(x = clusterdata, 
+                                centers = cluster_range[i], 
+                                iter.max = 20)
+    temp_tot_withinss[j] <- temp_results[[j]]$tot.withinss
+  }
+  
+  # Store the best run for each considered k
+  kmeans_results[[i]] <- temp_results[[which.min(temp_tot_withinss[j])]] 
+  # Keep track of k
+  kmeans_k[i] <- cluster_range[i]
+}
+
+
+# Elbow method - plot within-cluster SoS for each value of k 
+wss <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  wss[i] <- kmeans_results[[i]]$tot.withinss
+}
+wss_results = list(k = kmeans_k, wss = wss)
+
+wss1<- qplot(wss_results$k, wss_results$wss) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("SSE") +
+  ggtitle("Within-cluster SSEs")
+
+
+# Calculate and plot C-H index for each value of k
+ch <- numeric(length=length(kmeans_k))
+for(i in 1:length(kmeans_results)){
+  kmeans_betweenss <- kmeans_results[[i]]$betweenss
+  kmeans_tot_withinss <- kmeans_results[[i]]$tot.withinss
+  
+  ch[i] <- (kmeans_betweenss / (kmeans_k[i] - 1)) /
+    (kmeans_tot_withinss / (nrow(clusterdata) - kmeans_k[i]))
+}
+ch_index_results = list(k = kmeans_k, ch=ch)
+
+chind1<- qplot(ch_index_results$k, ch_index_results$ch) + 
+  geom_line() + 
+  xlab("Number of Clusters") + 
+  ylab("CH Score") +
+  ggtitle("CH-Score Cluster Number Selector ")
+
+
+# Capture best model for chosen value of k
+chosen_k <- 4
+clusters2 <- kmeans_results[[which(kmeans_k == chosen_k)]]
+
+
+```
+<br>
+<br>
+
+## Works Cited
+
+Gadiya, Karan. "FIFA 19 Complete Player Dataset." Kaggle, Dec. 2018, www.kaggle.com/karangadiya/fifa19.
+<br>
+Yauch, Liz. "84.51 Unsupervised Learning Workshop." Nov. 2018, Cincinnati, 1819 Innovation Hub.
+<br>
+<br>
+<br>
