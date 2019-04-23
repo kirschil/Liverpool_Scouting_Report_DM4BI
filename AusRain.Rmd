@@ -1,0 +1,341 @@
+---
+title: "Will it Rain Tomorrow in Australia?"
+author: ""
+date: ""
+output: html_document
+runtime: shiny
+---
+<style type="text/css">
+
+h1.title {
+  font-size: 38px;
+  color: Black;
+  text-align: center;
+}
+h4.author { /* Header 4 - and the author and data headers use this too  */
+    font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: Black;
+  text-align: center;
+}
+h4.date { /* Header 4 - and the author and data headers use this too  */
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+  text-align: center;
+}
+</style>
+
+<center>
+Iain Kirsch
+<br>
+`r Sys.Date()`
+</center>
+
+
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fastDummies)
+library(BBmisc)
+library(xgboost)
+library(Matrix)
+library(caret)
+library(xgboostExplainer)
+library(shiny)
+library(shinydashboard)
+data <- read.csv("weatherAUS.csv")
+
+set.seed(123)
+
+data <- data %>% 
+  select(-RISK_MM)
+
+data <- data %>% 
+  filter(!is.na(Evaporation)) %>% 
+  filter(!is.na(Sunshine)) %>% 
+  filter(!is.na(WindGustDir)) %>% 
+  filter(!is.na(Cloud9am)) %>% 
+  filter(!is.na(WindDir9am)) %>% 
+  filter(!is.na(Cloud3pm)) %>% 
+  filter(!is.na(RainToday)) %>% 
+  filter(!is.na(Humidity9am)) %>% 
+  filter(!is.na(WindDir3pm)) %>% 
+  filter(!is.na(Pressure9am)) %>% 
+  filter(!is.na(Pressure3pm)) %>% 
+  filter(!is.na(Humidity3pm))
+
+check <- as.data.frame(cbind(as.character(data$Date), as.character(data$Location)))
+names(check)<- c("Date", "Location")
+
+data <- data %>%
+  mutate_if(is.factor, as.character) %>% 
+  select(-Date)
+
+
+data2 <- fastDummies::dummy_cols(data)
+
+data2 <- data2 %>% 
+  select(-Location, -WindGustDir, -WindDir3pm, -WindDir9am, -RainToday, -RainTomorrow,
+         -RainToday_No, -RainTomorrow_No)
+
+normalizerset <- data2[1:16]
+laterset <- data2[17:92]
+
+addback <- normalize(normalizerset, method = "range", range = c(0,1))
+
+data <- as.data.frame(cbind(addback, laterset))
+
+smp_size <- floor(0.8 * nrow(data))
+
+
+
+train_ind <- sample(seq_len(nrow(data)), size = smp_size)
+
+check <- check[-train_ind, ]
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+
+train.label <- train$RainTomorrow_Yes
+test.label <- test$RainTomorrow_Yes
+
+train <- train %>% 
+  select(-RainTomorrow_Yes)
+test <- test %>% 
+  select(-RainTomorrow_Yes)
+
+traindata<- as.matrix(train)
+testdata<- as.matrix(test)
+
+dtrain.now <- xgb.DMatrix(data = traindata, label = train.label)
+dtest.now <- xgb.DMatrix(data = testdata, label = test.label)
+
+
+model <- xgboost(data = dtrain.now, max.depth = 6, eta = .3, nthread = 2, nrounds = 11, objective = "binary:logistic")
+
+pred.test<- as.data.frame(predict(model, testdata))
+
+imp <- xgb.importance(model=model, data=train, label = train.label)
+impplot <- xgb.plot.importance(imp, top_n = 12)
+
+xgbpred <- ifelse (pred.test > 0.2,1,0)
+xgbpred<- as.factor(as.vector(xgbpred))
+test.label2<- as.factor(test.label)
+conf.matrix <- confusionMatrix(xgbpred, test.label2)
+
+now.conf <- c(conf.matrix$table[2,1], conf.matrix$table[1,1], 
+                    conf.matrix$table[2,2], conf.matrix$table[1,2])
+
+xgbpred1 <- ifelse (pred.test > 0.49,1,0)
+xgbpred1<- as.factor(as.vector(xgbpred1))
+conf.matrix2 <- confusionMatrix(xgbpred1, test.label2)
+
+now.conf2 <- c(conf.matrix2$table[2,1], conf.matrix2$table[1,1], 
+              conf.matrix2$table[2,2], conf.matrix2$table[1,2])
+
+check$ID <- 1:11289
+check <- check %>%
+  mutate_if(is.factor, as.character)
+
+##
+explainer = buildExplainer(model, dtrain.now, type="binary", base_score = .5, trees_idx = NULL)
+pred.breakdown = explainPredictions(model, explainer, dtest.now)
+
+#waterfall <- showWaterfall(model, explainer, dtest.now, as.matrix(testdata), idx = 11271)
+fwater <- function(x,y){
+  check %>% 
+    filter(Location==x) %>% 
+    filter(Date==y) %>% 
+    select(ID) %>% 
+    pull()
+  
+}
+
+
+#showWaterfall(model, explainer, dtest.now, as.matrix(testdata), idx = fwater("Darwin", "2017-04-17"))
+##
+
+ActualValue <- factor(c(0, 0, 1, 1))
+PredictedValue <- factor(c(1, 0, 1, 0))
+
+dfx <- data.frame(ActualValue, PredictedValue, now.conf)
+
+confaverse<- ggplot(data =  dfx, mapping = aes(x = ActualValue, y = PredictedValue)) +
+  geom_tile(aes(fill = now.conf), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", now.conf)), vjust = 1) +
+  scale_fill_gradient(low = "deepskyblue", high = "firebrick") +
+  theme_bw() + theme(legend.position = "none")+
+  ggtitle("Test Data Confusion Matrix")+ ylab("Predicted Value") + xlab("Actual Value") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+
+
+
+dfx <- data.frame(ActualValue, PredictedValue, now.conf2)
+
+confacc <- ggplot(data =  dfx, mapping = aes(x = ActualValue, y = PredictedValue)) +
+  geom_tile(aes(fill = now.conf2), colour = "white") +
+  geom_text(aes(label = sprintf("%1.0f", now.conf2)), vjust = 1) +
+  scale_fill_gradient(low = "deepskyblue", high = "firebrick") +
+  theme_bw() + theme(legend.position = "none")+
+  ggtitle("Test Data Confusion Matrix")+ ylab("Predicted Value") + xlab("Actual Value") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+<br>
+
+### Introduction & Goal
+
+This individual project uses supervised learning to determine whether it will rain tomorrow in various parts of Australia based on information available the day prior. For this project, I utilized Extreme Gradient Boosting using the R package xgboost. The dataset was the Rain in Australia data available on Kaggle. In order to begin, some preprocessing was necessary. First, I removed the Risk-MM variable as the data description stated and filtered to only use complete rows. Next, I used Min-Max Normalization on the numeric columns of the dataframe. Categorical variables were turned into several binary variables in order to have completely numeric data to begin building the model. This led to a dataset with 92 columns and 56,441 observations. The variable Rain_Tomorrow was the dependent variable of interest in this project.
+
+### Model Description
+
+In order to begin creating the model, an 80/20 train/test split was created. This split was randomly done, and using different seeds did not lead to dissimilar results. One model was built to solve the same problem for two groups of people with differing motivations. The model itself had a maximum depth of six, an eta of 0.3 to prevent overfitting, and 11 rounds, as that is when the train error began to stabilize. The first model motivation is similar to one a weather channel would use, where achieving a high level of accuracy was of the utmost importance. For this, a threshold value of 0.49 was used to achieve accuracy of 86.13%. The second model motivation could be that of a business student wearing a suit to class. They are much more cautious as they don't want to get the suit wet. In fact, in this example they are so cautious that they set a condition that if the model is going to predict that it will not rain tomorrow it must be correct 95% of the time. To achieve this condition, the overall accuracy will decrease to 78.83%, as the rate of false positives will increase. However, this increase in false positives is somewhat mitigated by the reduction in false negatives. In order to achieve this the threshold is lowered to 0.20. Both thresholds make the model significant at the 1% and 3% levels respectively.
+<br>
+<br>
+
+```{r echo=FALSE}
+ui <- dashboardPage(skin = "blue",
+                    dashboardHeader(title= "Fig. 1: Confusion Matrix - Accuracy", titleWidth = 400),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fillPage(padding = 0,
+           box(title="", id="normal", solidHeader = TRUE, status = "primary", width=12,
+                    plotOutput("plot1", height = 250))
+            )))
+
+
+server <- function(input, output) {
+   
+    output$plot1<- renderPlot({
+    confacc
+      })
+    
+
+   }
+
+
+shinyApp(ui=ui, server=server)
+
+```
+
+<br>
+<br>
+
+```{r echo=FALSE}
+ui <- dashboardPage(skin = "blue",
+                    dashboardHeader(title= "Fig. 2: Confusion Matrix - Risk Averse", titleWidth = 450),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fillPage(padding = 0,
+           box(title="", id="normal", solidHeader = TRUE, status = "primary", width=12,
+                    plotOutput("plot1", height = 250))
+            )))
+
+
+server <- function(input, output) {
+   
+    output$plot1<- renderPlot({
+    confaverse
+      })
+    
+
+   }
+
+
+shinyApp(ui=ui, server=server)
+
+```
+<br>
+
+### Shining a Light
+
+Extreme Gradient Boosting often receives a lot of flak for being a "black-box" model. In order to help illuminate the inner working of the model, the package xgboostExplainer was used. This package allows the user to look under the hood and understand which variables are shaping the prediction for a particular observation using a waterfall chart. The chart below shows the observation for Darwin, Australia on April 17th, 2017. In order to determine if there will be rain on the 18th, the model uses several variables. Most important among the variables reducing the chances of rain are the Humidity at 3 P.M., and the Wind Gust Speed. The lack of Sunshine, Pressure at 3 P.M., and Minimum Temperature were the variables doing the most to increase the chances of rain on the next day. Interestingly, this particular observation would receive two different predictions based on the two thresholds set for the two motivations. The weather channel, using their higher threshold would not forecast rain for the 18th, while the business student would be certain to bring their umbrella to class the next day. On this particular occasion the weather channel would be proven correct.
+
+```{r echo=FALSE}
+
+ui <- dashboardPage(skin = "blue",
+                    dashboardHeader(title= "Fig. 3: XGBOOST Prediction Analysis - One Rainy Day?", titleWidth = 400),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fluidRow(
+           box(title="", id="normal", solidHeader = TRUE, status = "primary", width=7, 
+                    plotOutput("plot1", height = 400)), 
+            box(title="Location", background = "black", width=5, 
+                    selectInput("variable", "Location:", choices= sort(unique(check$Location)), selected="Darwin")),
+           box(title="Date", background = "black", width=5, 
+                    selectInput("variable.two", "Date:", choices= c(unique(check$Date)), selected="2017-04-17"))
+            )))
+
+
+server <- function(input, output) {
+  
+   
+    output$plot1<- renderPlot({
+      showWaterfall(model, explainer, dtest.now, as.matrix(testdata), 
+                    idx = fwater(input$variable, input$variable.two))
+    
+
+
+   })
+}
+
+shinyApp(ui=ui, server=server)
+
+
+```
+<br>
+*It's fairly simple to build a shiny app that can be used to show the waterfall explainer for any given date and location in the test dataset, however, there are many instances where there is not data for a particular combination of Date and Location*
+
+<br>
+```{r echo=FALSE}
+
+ui <- dashboardPage(skin = "blue",
+                    dashboardHeader(title= "Fig. 4: Importance Plot", titleWidth = 400),
+                    dashboardSidebar(disable=TRUE),
+                    dashboardBody(
+                      fillPage(padding = 0,
+           box(title="", id="normal", solidHeader = TRUE, status = "primary", width=12,
+                    plotOutput("plot1", height = 250))
+            )))
+
+
+server <- function(input, output) {
+   
+    output$plot1<- renderPlot({
+    xgb.plot.importance(imp, top_n = 12)
+      })
+    
+
+   }
+
+
+shinyApp(ui=ui, server=server)
+
+```
+<br>
+<br>
+
+
+
+<br>
+
+### Conclusion
+
+Overall, the models achieve their purpose in that they are significant and useful in achieving either high accuracy or relatively good accuracy with a condition. The ability to determine the most important features on both the model and observation level of detail provides a level of understanding about what is actually happening and why each prediction is being made. The improved interpretability allows a model that was previously seen as a bit of a black box to be much more open and a viable alternative to more widely used supervised learning methods like logistic regression or random forests. 
+
+### Works Cited
+
+Young, Joe. "Rain in Australia." Kaggle, 3 Dec. 2018, www.kaggle.com/jsphyg/weather-dataset-rattle-package.
+
+
+<br>
+<br>
+
+
+
+
+
+
