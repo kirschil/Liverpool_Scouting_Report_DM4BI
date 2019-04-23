@@ -624,6 +624,7 @@ table4.2
 <br>
 <br>
 
+
 ## Conclusion and Code
 In conclusion, this analysis has found clustering to be a useful way to group similar targets together so we can see who most closely resembles targets that we cannot successfully purchase. The code below is to show how the clustering process was conducted in R. As an obvious disclaimer, I do not work for Liverpool FC and this is merely the analysis of a fan. 
 
@@ -699,6 +700,7 @@ clusters2 <- kmeans_results[[which(kmeans_k == chosen_k)]]
 ```
 <br>
 <br>
+
 
 ## Works Cited
 
